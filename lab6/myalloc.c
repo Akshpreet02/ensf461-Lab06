@@ -1,180 +1,184 @@
 #include <stddef.h>
 #include <sys/mman.h>
-#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include "myalloc.h"
 
-#define PAGE_SIZE 4096
-#define MIN_ALLOC_SIZE (sizeof(struct block) + 16)
-#define MAX_ALLOC_SIZE (PAGE_SIZE - sizeof(struct block))
+#define MAX_ARENA_SIZE (0x7FFFFFFF) // Adjust the definition of MAX_ARENA_SIZE
 
-struct block {
-    size_t size;
-    struct block* next;
-};
+#define ALIGN(size) (((size) + (sizeof(node_t) - 1)) & ~(sizeof(node_t) - 1))
 
-static struct block* head = NULL;
-static void* _arena_start = NULL;
-static size_t total_size = 0;
+#define PRINTF_GREEN(...)         \
+    fprintf(stderr, "\033[32m");  \
+    fprintf(stderr, __VA_ARGS__); \
+    fprintf(stderr, "\033[0m");
 
-int myinit(size_t size) {
-    if (size == 0 || size % PAGE_SIZE != 0 || size > MAX_ALLOC_SIZE) {
-        return 0;
+static void *arena_start = NULL;
+static size_t arena_size = 0;
+size_t remaining = 0;
+
+int statusno = 0;
+
+int myinit(size_t size)
+{
+    if (size <= 0 || size > MAX_ARENA_SIZE)
+    {
+        statusno = ERR_BAD_ARGUMENTS;
+        return statusno; // Return an error code.
     }
 
-    _arena_start = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-    if (_arena_start == MAP_FAILED) {
-        return 0;
+    size_t page_size = getpagesize();
+
+    PRINTF_GREEN("Initializing arena:\n");
+    PRINTF_GREEN("...requested size %zu bytes\n", size);
+    PRINTF_GREEN("...pagesize is %zu bytes\n", page_size);
+
+    // size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
+    size_t aligned_size = (size + page_size - 1) / page_size * page_size;
+
+    PRINTF_GREEN("...adjusting size with page boundaries\n");
+    PRINTF_GREEN("...adjusted size is %zu bytes\n", aligned_size);
+
+    arena_start = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (arena_start == MAP_FAILED)
+    {
+        statusno = ERR_SYSCALL_FAILED;
+        return -1; // Failed to initialize the arena.
     }
 
-    head = _arena_start;
-    head->size = size - sizeof(struct block);
-    head->next = NULL;
-    total_size = size;
+    arena_size = aligned_size;
+    remaining = aligned_size;
 
-    return 1;
+    PRINTF_GREEN("...mapping arena with mmap()\n");
+    PRINTF_GREEN("...arena starts at %p\n", arena_start);
+    PRINTF_GREEN("...arena ends at %p\n", (char *)arena_start + arena_size);
+    node_t *initial_header = (node_t *)arena_start;
+    initial_header->size = aligned_size - sizeof(node_t);
+    initial_header->is_free = 1;
+    initial_header->fwd = NULL;
+    initial_header->bwd = NULL;
+
+    statusno = 0; // Set statusno to indicate success.
+
+    return arena_size; // Return arena size.
 }
 
-//FUNCTION: myalloc
-//INPUT: size_t size
-//OUTPUT: returns a pointer to the allocated memory if successful, NULL if not
-//DESCRIPTION: allocates a block of memory of at least the requested size. The
-//returned pointer is guaranteed to be aligned to a 16-byte boundary. The
-//returned block of memory may be larger than the requested size. The extra
-//space is used to store information about the block. If the requested size is
-//0, then the returned pointer is NULL. If the requested size is larger than
-//the maximum size that can be allocated, then the returned pointer is NULL.
-//NO USING MALLOC() IN THIS FUNCTION
-void* myalloc(size_t size){
-    if (size == 0 || size > MAX_ALLOC_SIZE) {
+int mydestroy()
+{
+    if (arena_size == 0)
+    {
+        statusno = ERR_UNINITIALIZED;
+        return statusno; // Arena was not initialized.
+    }
+    PRINTF_GREEN("Destroying Arena:\n");
+    PRINTF_GREEN("...unmapping arena with munmap()\n");
+
+    if (munmap(arena_start, arena_size) == -1)
+    {
+        statusno = ERR_SYSCALL_FAILED;
+        return statusno; // Failed to destroy the arena.
+    }
+
+    arena_start = NULL;
+    arena_size = 0;
+    statusno = 0; // Set statusno to indicate success.
+
+    return 0; // Return success.
+}
+
+void *myalloc(size_t size)
+{
+    if (arena_size == 0)
+    {
+        statusno = ERR_UNINITIALIZED;
         return NULL;
     }
 
-    // Align size to 16-byte boundary
-    size_t aligned_size = (size + 15) & ~15;
+    size_t aligned_size = ALIGN(size); // Include space for node_t structure
 
-    // Find first block that is large enough
-    struct block* curr = head;
-    struct block* prev = NULL;
-    while (curr != NULL && curr->size < aligned_size) {
-        prev = curr;
-        curr = curr->next;
+    // Check if the requested size with the header exceeds the available memory
+    if (aligned_size + sizeof(node_t) > remaining)
+    {
+        statusno = ERR_OUT_OF_MEMORY;
+        return NULL;
     }
 
-    if (curr == NULL) {
-        // No block is large enough, allocate a new one
-        size_t block_size = aligned_size + sizeof(struct block);
-        if (block_size < MIN_ALLOC_SIZE) {
-            block_size = MIN_ALLOC_SIZE;
+    node_t *header = (node_t *)arena_start;
+
+    while (header->fwd != NULL)
+    {
+        if (header->is_free && header->size >= aligned_size)
+        {
+            break;
         }
-
-        void* block = mmap(NULL, block_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-        if (block == MAP_FAILED) {
-            return NULL;
-        }
-
-        struct block* new_block = block;
-        new_block->size = block_size - sizeof(struct block);
-        new_block->next = NULL;
-
-        if (prev == NULL) {
-            head = new_block;
-        } else {
-            prev->next = new_block;
-        }
-
-        return (void*) ((char*) new_block + sizeof(struct block));
-    } else {
-        // Split block if it is large enough
-        size_t remaining_size = curr->size - aligned_size;
-        if (remaining_size >= MIN_ALLOC_SIZE) {
-            struct block* new_block = (struct block*) ((char*) curr + sizeof(struct block) + aligned_size);
-            new_block->size = remaining_size - sizeof(struct block);
-            new_block->next = curr->next;
-
-            curr->size = aligned_size;
-
-            if (prev == NULL) {
-                head = new_block;
-            } else {
-                prev->next = new_block;
-            }
-        }
-
-        return (void*) ((char*) curr + sizeof(struct block));
+        header = header->fwd;
     }
+
+    if (header == NULL)
+    {
+        statusno = ERR_OUT_OF_MEMORY;
+        return NULL;
+    }
+
+    if (header->size - aligned_size >= sizeof(node_t))
+    {
+        node_t *new_header = (node_t *)((char *)header + aligned_size) + sizeof(node_t);
+        new_header->size = header->size - aligned_size - sizeof(node_t);
+        new_header->is_free = 1;
+        new_header->fwd = header->fwd;
+        new_header->bwd = header;
+
+        header->size = aligned_size;
+        header->fwd = new_header;
+    }
+
+    header->is_free = 0;
+
+    remaining -= aligned_size + sizeof(node_t);
+
+    return (void *)((char *)header + sizeof(node_t));
 }
 
-
-//FUNCTION: myfree
-//INPUT: void* ptr
-//OUTPUT: none
-//DESCRIPTION: frees a block of memory that was previously allocated using
-//myalloc(). If the ptr argument is NULL, then the function does nothing. If
-//the ptr argument is not NULL, but it was not returned by a previous call to
-//myalloc(), then the function does nothing. If the ptr argument is not NULL
-//and it was returned by a previous call to myalloc(), then the function frees
-//the block of memory and makes it available for future allocations.
-//NO USING MALLOC() IN THIS FUNCTION
-void myfree(void* ptr){
-    if (ptr == NULL) {
+void myfree(void *ptr)
+{
+    if (ptr == NULL)
+    {
+        printf("Trying to free a NULL pointer.\n");
         return;
     }
 
-    struct block* curr = (struct block*) ((char*) ptr - sizeof(struct block));
-    if (curr < head || curr >= (struct block*) ((char*) _arena_start + total_size)) {
+    node_t *header = (node_t *)((char *)ptr - sizeof(node_t));
+
+    if (header->is_free)
+    {
+        printf("Error: Trying to free an already freed block.\n");
         return;
     }
 
-    struct block* prev = NULL;
-    struct block* next = head;
-    while (next != NULL && next < curr) {
-        prev = next;
-        next = next->next;
+    header->is_free = 1;
+
+    // Coalesce with the next chunk if it's free
+    while (header->fwd != NULL && header->fwd->is_free)
+    {
+        header->size += header->fwd->size + sizeof(node_t);
+        header->fwd = header->fwd->fwd;
+        if (header->fwd != NULL)
+        {
+            header->fwd->bwd = header;
+        }
     }
 
-    if (prev == NULL) {
-        head = curr;
-    } else {
-        prev->next = curr;
+    // Coalesce with the previous chunk if it's free
+    while (header->bwd != NULL && header->bwd->is_free)
+    {
+        header->bwd->size += header->size + sizeof(node_t);
+        header->bwd->fwd = header->fwd;
+        if (header->fwd != NULL)
+        {
+            header->fwd->bwd = header->bwd;
+        }
+        header = header->bwd;
     }
-
-    curr->next = next;
-
-    // Merge with next block if adjacent
-    if (next != NULL && (char*) curr + sizeof(struct block) + curr->size == (char*) next) {
-        curr->size += sizeof(struct block) + next->size;
-        curr->next = next->next;
-    }
-
-    // Merge with previous block if adjacent
-    if (prev != NULL && (char*) prev + sizeof(struct block) + prev->size == (char*) curr) {
-        prev->size += sizeof(struct block) + curr->size;
-        prev->next = curr->next;
-    }
-}
-
-
-//FUNCTION: mydestroy
-//INPUT: none
-//OUTPUT: returns 1 if successful, 0 if not
-//DESCRIPTION: destroys the memory allocator. Any existing allocated memory
-//blocks are freed. After this function is called, any future calls to myalloc()
-//or myfree() will fail. If the function is successful, then it returns 1. If
-//the function fails, then it returns 0.
-//NO USING MALLOC() IN THIS FUNCTION
-int mydestroy(){
-    struct block* curr = head;
-    while (curr != NULL) {
-        struct block* next = curr->next;
-        munmap(curr, sizeof(struct block) + curr->size);
-        curr = next;
-    }
-
-    head = NULL;
-    _arena_start = NULL;
-    total_size = 0;
-
-    return 1;
 }
