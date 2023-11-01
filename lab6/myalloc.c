@@ -16,7 +16,7 @@
 
 static void *arena_start = NULL;
 static size_t arena_size = 0;
-size_t remaining = 0;
+size_t left = 0;
 
 int statusno = 0;
 
@@ -49,7 +49,7 @@ int myinit(size_t size)
     }
 
     arena_size = aligned_size;
-    remaining = aligned_size;
+    left = aligned_size;
 
     PRINTF_GREEN("...mapping arena with mmap()\n");
     PRINTF_GREEN("...arena starts at %p\n", arena_start);
@@ -99,7 +99,7 @@ void *myalloc(size_t size)
     size_t aligned_size = ALIGN(size); // Include space for node_t structure
 
     // Check if the requested size with the header exceeds the available memory
-    if (aligned_size + sizeof(node_t) > remaining)
+    if (aligned_size + sizeof(node_t) > left)
     {
         statusno = ERR_OUT_OF_MEMORY;
         return NULL;
@@ -136,7 +136,7 @@ void *myalloc(size_t size)
 
     header->is_free = 0;
 
-    remaining -= aligned_size + sizeof(node_t);
+    left -= aligned_size + sizeof(node_t);
 
     return (void *)((char *)header + sizeof(node_t));
 }
