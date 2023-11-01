@@ -14,9 +14,11 @@
     fprintf(stderr, __VA_ARGS__); \
     fprintf(stderr, "\033[0m");
 
-static void *arena_start = NULL;
-static size_t arena_size = 0;
 size_t left = 0;
+
+static void *startOfArena = NULL;
+
+static size_t arenaSize = 0;
 
 int statusno = 0;
 
@@ -40,21 +42,21 @@ int myinit(size_t size)
     PRINTF_GREEN("...adjusting size with page boundaries\n");
     PRINTF_GREEN("...adjusted size is %zu bytes\n", aligned_size);
 
-    arena_start = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    startOfArena = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
-    if (arena_start == MAP_FAILED)
+    if (startOfArena == MAP_FAILED)
     {
         statusno = ERR_SYSCALL_FAILED;
         return -1; // Failed to initialize the arena.
     }
 
-    arena_size = aligned_size;
+    arenaSize = aligned_size;
     left = aligned_size;
 
     PRINTF_GREEN("...mapping arena with mmap()\n");
-    PRINTF_GREEN("...arena starts at %p\n", arena_start);
-    PRINTF_GREEN("...arena ends at %p\n", (char *)arena_start + arena_size);
-    node_t *initial_header = (node_t *)arena_start;
+    PRINTF_GREEN("...arena starts at %p\n", startOfArena);
+    PRINTF_GREEN("...arena ends at %p\n", (char *)startOfArena + arenaSize);
+    node_t *initial_header = (node_t *)startOfArena;
     initial_header->size = aligned_size - sizeof(node_t);
     initial_header->is_free = 1;
     initial_header->fwd = NULL;
@@ -62,12 +64,12 @@ int myinit(size_t size)
 
     statusno = 0; // Set statusno to indicate success.
 
-    return arena_size; // Return arena size.
+    return arenaSize; // Return arena size.
 }
 
 int mydestroy()
 {
-    if (arena_size == 0)
+    if (arenaSize == 0)
     {
         statusno = ERR_UNINITIALIZED;
         return statusno; // Arena was not initialized.
@@ -75,14 +77,14 @@ int mydestroy()
     PRINTF_GREEN("Destroying Arena:\n");
     PRINTF_GREEN("...unmapping arena with munmap()\n");
 
-    if (munmap(arena_start, arena_size) == -1)
+    if (munmap(startOfArena, arenaSize) == -1)
     {
         statusno = ERR_SYSCALL_FAILED;
         return statusno; // Failed to destroy the arena.
     }
 
-    arena_start = NULL;
-    arena_size = 0;
+    startOfArena = NULL;
+    arenaSize = 0;
     statusno = 0; // Set statusno to indicate success.
 
     return 0; // Return success.
@@ -90,7 +92,7 @@ int mydestroy()
 
 void *myalloc(size_t size)
 {
-    if (arena_size == 0)
+    if (arenaSize == 0)
     {
         statusno = ERR_UNINITIALIZED;
         return NULL;
@@ -105,7 +107,7 @@ void *myalloc(size_t size)
         return NULL;
     }
 
-    node_t *header = (node_t *)arena_start;
+    node_t *header = (node_t *)startOfArena;
 
     while (header->fwd != NULL)
     {
